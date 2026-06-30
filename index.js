@@ -79,12 +79,24 @@ function calcRSI(closes, period = 14) {
   return Math.round((100 - (100 / (1 + avgGain/avgLoss))) * 10) / 10;
 }
 
-const TOP_COINS = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','AVAXUSDT','DOTUSDT','LINKUSDT','MATICUSDT','UNIUSDT','LTCUSDT','ATOMUSDT','NEARUSDT','APTUSDT','SUIUSDT','ARBUSDT','OPUSDT','FILUSDT','INJUSDT','TIAUSDT','SEIUSDT','JUPUSDT','WIFUSDT','PEPEUSDT','SHIBUSDT','FETUSDT','RENDERUSDT','ONDOUSDT','TRXUSDT','TONUSDT','BNBUSDT','XLMUSDT','VETUSDT','ICPUSDT','AAVEUSDT','MKRUSDT','ENAUSDT','WLDUSDT','PYTHUSDT'];
+const TOP_COINS = ['BTC','ETH','SOL','XRP','DOGE','ADA','AVAX','DOT','LINK','UNI','LTC','ATOM','NEAR','APT','SUI','ARB','OP','FIL','INJ','TIA','SEI','PEPE','SHIB','FET','RENDER','TRX','TON','BNB','XLM','VET','ICP','AAVE','MKR','ENA','WLD','PYTH'];
 
-async function getKlines(symbol, interval, limit = 100) {
-  const urls = [`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, `https://api1.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, `https://api2.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`];
-  for (const url of urls) { try { const data = await fetchJSON(url); if (Array.isArray(data) && data.length > 0) return data; } catch(e) { continue; } }
-  return [];
+async function getCandles(symbol) {
+  const url = `https://min-api.cryptocompare.com/data/v2/histominute?fsym=${symbol}&tsym=USDT&limit=100&aggregate=30`;
+  try {
+    const data = await fetchJSON(url);
+    if (data?.Data?.Data) return data.Data.Data.map(c => c.close);
+  } catch(e) {}
+  return null;
+}
+
+async function getCandles1h(symbol) {
+  const url = `https://min-api.cryptocompare.com/data/v2/histohour?fsym=${symbol}&tsym=USDT&limit=100`;
+  try {
+    const data = await fetchJSON(url);
+    if (data?.Data?.Data) return data.Data.Data.map(c => c.close);
+  } catch(e) {}
+  return null;
 }
 
 async function scanAndNotify(label) {
@@ -92,33 +104,32 @@ async function scanAndNotify(label) {
   const found = [];
   for (const sym of TOP_COINS) {
     try {
-      const [k30, k1h] = await Promise.all([getKlines(sym, '30m'), getKlines(sym, '1h')]);
-      if (k30.length < 15 || k1h.length < 15) continue;
-      const c30 = k30.map(k => parseFloat(k[4])), c1h = k1h.map(k => parseFloat(k[4]));
+      const [c30, c1h] = await Promise.all([getCandles(sym), getCandles1h(sym)]);
+      if (!c30 || !c1h || c30.length < 15 || c1h.length < 15) { console.log(`  ${sym}: Veri yok`); continue; }
       const r30 = calcRSI(c30), r1h = calcRSI(c1h);
       if (r30 === null || r1h === null) continue;
       const price = c30[c30.length - 1];
       const chg30 = Math.round((c30[c30.length-1] - c30[c30.length-2]) / c30[c30.length-2] * 10000) / 100;
       const chg1h = Math.round((c1h[c1h.length-1] - c1h[c1h.length-2]) / c1h[c1h.length-2] * 10000) / 100;
       const isLow30 = r30 < RSI_LOW, isHigh30 = r30 > RSI_HIGH, isLow1h = r1h < RSI_LOW, isHigh1h = r1h > RSI_HIGH;
-      let trigger = false, dir = '';
-      if (isLow30 || isLow1h) { trigger = true; dir = 'DOWN'; }
-      if (isHigh30 || isHigh1h) { trigger = true; dir = 'UP'; }
+      let trigger = false;
+      if (isLow30 || isLow1h) trigger = true;
+      if (isHigh30 || isHigh1h) trigger = true;
       console.log(`  ${sym}: 30m=${r30} 1h=${r1h} $${price}`);
       if (trigger) {
         const b30 = chg30 >= 0 ? `+${chg30}%` : `${chg30}%`, b1h = chg1h >= 0 ? `+${chg1h}%` : `${chg1h}%`;
         const a30 = isHigh30 ? ' >>>' : isLow30 ? ' vvv' : '', a1h = isHigh1h ? ' >>>' : isLow1h ? ' vvv' : '';
-        found.push(`<b>${sym}</b> (${label})\nFiyat: <b>$${price}</b>\n\n30m RSI: <b>${r30}${a30}</b> (${b30})\n1h RSI: <b>${r1h}${a1h}</b> (${b1h})\n\n<a href="https://www.tradingview.com/chart/?symbol=BINANCE:${sym}">TradingView</a>`);
+        found.push(`<b>${sym}USDT</b> (${label})\nFiyat: <b>$${price}</b>\n\n30m RSI: <b>${r30}${a30}</b> (${b30})\n1h RSI: <b>${r1h}${a1h}</b> (${b1h})\n\n<a href="https://www.tradingview.com/chart/?symbol=BINANCE:${sym}USDT">TradingView</a>`);
       }
-    } catch(e) { continue; }
+    } catch(e) { console.log(`  ${sym}: HATA ${e.message}`); continue; }
   }
   for (const f of found) { await sendTelegram(f); await new Promise(r => setTimeout(r, 500)); }
   console.log(`[SONUC] ${found.length} coin gonderildi`);
 }
 
 async function main() {
-  console.log('RSI Scanner Cloud v3');
-  await sendTelegram('<b>RSI Scanner v3 Baslatildi!</b>\n\n/scan /dur /devam /durum');
+  console.log('RSI Scanner Cloud v4 - CryptoCompare');
+  await sendTelegram('<b>RSI Scanner v4 Baslatildi!</b>\n\n/scan /dur /devam /durum');
   await scanAndNotify('ILK TARAMA');
   setInterval(async () => {
     await handleCommands();
