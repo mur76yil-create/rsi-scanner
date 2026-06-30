@@ -19,29 +19,15 @@ let lastScan1h = '';
 let running = true;
 let lastUpdateId = 0;
 
-function fetchJSON(url) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const options = {
-      hostname: u.hostname,
-      port: u.port || 443,
-      path: u.pathname + u.search,
-      method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 20000
-    };
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch(e) { reject(new Error('JSON parse error: ' + data.substring(0, 100))); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
-    req.end();
-  });
+async function fetchJSON(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch(e) { clearTimeout(timeout); throw e; }
 }
 
 function post(url, body) {
@@ -91,24 +77,22 @@ async function handleCommands() {
     const msg = u.message?.text;
     const fromId = u.message?.from?.id?.toString();
     if (fromId !== CHAT_ID || !msg) continue;
-    
     console.log('[KOMUT]', msg);
-    
     if (msg === '/start') {
       running = true;
-      await sendTelegram('<b>Scanner Baslatildi!</b>\n\nKomutlar:\n/scan - Simdi tara\n/dur - Durdur\n/devam - Devam et\n/durum - Durum bilgisi');
+      await sendTelegram('<b>Scanner Baslatildi!</b>\n\n/scan /dur /devam /durum');
     } else if (msg === '/dur') {
       running = false;
-      await sendTelegram('<b>Scanner Durduruldu!</b>');
+      await sendTelegram('<b>Durduruldu!</b>');
     } else if (msg === '/devam') {
       running = true;
-      await sendTelegram('<b>Scanner Devam Ediyor!</b>');
+      await sendTelegram('<b>Devam Ediyor!</b>');
     } else if (msg === '/scan') {
       await sendTelegram('Tarama basliyor...');
       await scanAndNotify('MANUEL TARAMA');
     } else if (msg === '/durum') {
-      const status = running ? 'CALISIYOR' : 'DURDU';
-      await sendTelegram(`<b>Scanner Durumu</b>\n\nDurum: ${status}\nSon 30m: ${lastScan30m}\nSon 1h: ${lastScan1h}\nRSI: <${RSI_LOW} veya >${RSI_HIGH}`);
+      const s = running ? 'CALISIYOR' : 'DURDU';
+      await sendTelegram(`<b>Durum:</b> ${s}\nSon 30m: ${lastScan30m}\nSon 1h: ${lastScan1h}`);
     }
   }
 }
@@ -126,118 +110,77 @@ function calcRSI(closes, period = 14) {
     avgLoss = (avgLoss * (period - 1) + losses[i]) / period;
   }
   if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return Math.round((100 - (100 / (1 + rs))) * 10) / 10;
+  return Math.round((100 - (100 / (1 + avgGain/avgLoss))) * 10) / 10;
 }
 
 async function getTopSymbols(limit = 50) {
   try {
     const data = await fetchJSON('https://api.binance.com/api/v3/ticker/24hr');
-    if (!Array.isArray(data)) { console.log('[HATA] Binance response:', typeof data); return []; }
+    if (!Array.isArray(data)) { console.log('[HATA] Binance:', JSON.stringify(data).substring(0, 200)); return []; }
     return data
       .filter(d => d.symbol.endsWith('USDT') && !d.symbol.match(/UP|DOWN|BULL|BEAR|4L|3L|2L|2S|3S|4S/))
       .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
       .slice(0, limit)
       .map(d => d.symbol);
-  } catch(e) { console.log('[HATA] getTopSymbols:', e.message); return []; }
+  } catch(e) { console.log('[HATA] Symbols:', e.message); return []; }
 }
 
 async function getKlines(symbol, interval, limit = 100) {
-  return await fetchJSON(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+  try {
+    return await fetchJSON(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+  } catch(e) { return []; }
 }
 
 async function scanAndNotify(label) {
-  console.log(`\n${'='.repeat(50)}`);
-  console.log(`[${new Date().toLocaleTimeString('tr-TR')}] ${label} Taramasi`);
-  
+  console.log(`\n[${new Date().toLocaleTimeString('tr-TR')}] ${label}`);
   const symbols = await getTopSymbols(50);
   if (!symbols.length) { console.log('[HATA] Symbol listesi alinamadi'); return; }
-  
   console.log(`[INFO] ${symbols.length} coin taranacak`);
   const found = [];
-  
   for (const sym of symbols) {
     try {
-      const [k30, k1h] = await Promise.all([
-        getKlines(sym, '30m'),
-        getKlines(sym, '1h')
-      ]);
-      
-      if (!k30?.length || !k1h?.length) continue;
-      if (k30.length < RSI_PERIOD + 1 || k1h.length < RSI_PERIOD + 1) continue;
-      
+      const [k30, k1h] = await Promise.all([getKlines(sym, '30m'), getKlines(sym, '1h')]);
+      if (!k30?.length || !k1h?.length || k30.length < 15 || k1h.length < 15) continue;
       const c30 = k30.map(k => parseFloat(k[4]));
       const c1h = k1h.map(k => parseFloat(k[4]));
-      const r30 = calcRSI(c30);
-      const r1h = calcRSI(c1h);
-      
+      const r30 = calcRSI(c30), r1h = calcRSI(c1h);
       if (r30 === null || r1h === null) continue;
-      
       const price = c30[c30.length - 1];
-      const chg30 = c30.length >= 2 ? Math.round((c30[c30.length-1] - c30[c30.length-2]) / c30[c30.length-2] * 10000) / 100 : 0;
-      const chg1h = c1h.length >= 2 ? Math.round((c1h[c1h.length-1] - c1h[c1h.length-2]) / c1h[c1h.length-2] * 10000) / 100 : 0;
-      
-      const isLow30 = r30 < RSI_LOW;
-      const isHigh30 = r30 > RSI_HIGH;
-      const isLow1h = r1h < RSI_LOW;
-      const isHigh1h = r1h > RSI_HIGH;
-      
-      let trigger = false, direction = '';
-      if (isLow30 || isLow1h) { trigger = true; direction = 'DOWN'; }
-      if (isHigh30 || isHigh1h) { trigger = true; direction = 'UP'; }
-      
-      const color = (isLow30 || isLow1h) ? 'GREEN' : (isHigh30 || isHigh1h) ? 'RED' : '';
-      console.log(`  ${sym}: RSI30m=${r30} | RSI1h=${r1h} | Price=${price} ${color}`);
-      
+      const chg30 = Math.round((c30[c30.length-1] - c30[c30.length-2]) / c30[c30.length-2] * 10000) / 100;
+      const chg1h = Math.round((c1h[c1h.length-1] - c1h[c1h.length-2]) / c1h[c1h.length-2] * 10000) / 100;
+      const isLow30 = r30 < RSI_LOW, isHigh30 = r30 > RSI_HIGH;
+      const isLow1h = r1h < RSI_LOW, isHigh1h = r1h > RSI_HIGH;
+      let trigger = false, dir = '';
+      if (isLow30 || isLow1h) { trigger = true; dir = 'DOWN'; }
+      if (isHigh30 || isHigh1h) { trigger = true; dir = 'UP'; }
+      console.log(`  ${sym}: 30m=${r30} 1h=${r1h} $${price}`);
       if (trigger) {
-        const boost30 = chg30 >= 0 ? `+${chg30}%` : `${chg30}%`;
-        const boost1h = chg1h >= 0 ? `+${chg1h}%` : `${chg1h}%`;
-        const arrow30 = isHigh30 ? ' >>>' : isLow30 ? ' vvv' : '';
-        const arrow1h = isHigh1h ? ' >>>' : isLow1h ? ' vvv' : '';
-        const tvLink = `https://www.tradingview.com/chart/?symbol=BINANCE:${sym}`;
-        
-        const msg = `<b>${sym}</b> (${label})\nFiyat: <b>${price} USDT</b>\n\n30m RSI: <b>${r30}${arrow30}</b> (${boost30})\n1h RSI: <b>${r1h}${arrow1h}</b> (${boost1h})\n\n<a href="${tvLink}">TradingView</a>`;
-        found.push({ sym, msg });
+        const b30 = chg30 >= 0 ? `+${chg30}%` : `${chg30}%`;
+        const b1h = chg1h >= 0 ? `+${chg1h}%` : `${chg1h}%`;
+        const a30 = isHigh30 ? ' >>>' : isLow30 ? ' vvv' : '';
+        const a1h = isHigh1h ? ' >>>' : isLow1h ? ' vvv' : '';
+        const tv = `https://www.tradingview.com/chart/?symbol=BINANCE:${sym}`;
+        const m = `<b>${sym}</b> (${label})\nFiyat: <b>$${price}</b>\n\n30m RSI: <b>${r30}${a30}</b> (${b30})\n1h RSI: <b>${r1h}${a1h}</b> (${b1h})\n\n<a href="${tv}">TradingView</a>`;
+        found.push(m);
       }
     } catch(e) { continue; }
   }
-  
-  if (found.length) {
-    for (const f of found) {
-      await sendTelegram(f.msg);
-      await new Promise(r => setTimeout(r, 500));
-    }
-    console.log(`[BULUNDU] ${found.length} coin gonderildi`);
-  } else {
-    console.log('[BOS] Sinyal yok');
-  }
+  for (const f of found) { await sendTelegram(f); await new Promise(r => setTimeout(r, 500)); }
+  console.log(`[SONUC] ${found.length} coin gonderildi`);
 }
 
 async function main() {
-  console.log('RSI Scanner Cloud v1 Baslatildi');
-  console.log(`  RSI: <${RSI_LOW} veya >${RSI_HIGH}`);
-  console.log(`  Telegram: ${CHAT_ID}`);
-  
-  await sendTelegram('<b>RSI Scanner Cloud Baslatildi!</b>\n\nPC kapali olsa da calisiyor!\n\nKomutlar:\n/scan - Simdi tara\n/dur - Durdur\n/devam - Devam et\n/durum - Durum bilgisi');
-  
+  console.log('RSI Scanner Cloud v2');
+  console.log(`Node: ${process.version}`);
+  await sendTelegram('<b>RSI Scanner v2 Baslatildi!</b>\n\n/scan /dur /devam /durum');
   await scanAndNotify('ILK TARAMA');
-  
   setInterval(async () => {
     await handleCommands();
     if (!running) return;
-    
-    const now = new Date();
-    const min = now.getMinutes();
+    const now = new Date(), min = now.getMinutes();
     const ts = `${String(now.getHours()).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
-    
-    if ((min === 0 || min === 30) && ts !== lastScan30m) {
-      await scanAndNotify('30m Kapanis');
-      lastScan30m = ts;
-    }
-    if (min === 0 && ts !== lastScan1h) {
-      await scanAndNotify('1h Kapanis');
-      lastScan1h = ts;
-    }
+    if ((min === 0 || min === 30) && ts !== lastScan30m) { await scanAndNotify('30m Kapanis'); lastScan30m = ts; }
+    if (min === 0 && ts !== lastScan1h) { await scanAndNotify('1h Kapanis'); lastScan1h = ts; }
   }, SCAN_INTERVAL);
 }
 
