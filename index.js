@@ -19,17 +19,28 @@ let lastScan1h = '';
 let running = true;
 let lastUpdateId = 0;
 
-function fetch(url) {
+function fetchJSON(url) {
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith('https') ? https : http;
-    mod.get(url, { timeout: 15000 }, (res) => {
+    const u = new URL(url);
+    const options = {
+      hostname: u.hostname,
+      port: u.port || 443,
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 20000
+    };
+    const req = https.request(options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try { resolve(JSON.parse(data)); }
-        catch(e) { resolve(data); }
+        catch(e) { reject(new Error('JSON parse error: ' + data.substring(0, 100))); }
       });
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    req.end();
   });
 }
 
@@ -68,9 +79,9 @@ async function sendTelegram(msg) {
 
 async function getUpdates() {
   try {
-    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=1`);
+    const r = await fetchJSON(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=1`);
     return r.result || [];
-  } catch(e) { return []; }
+  } catch(e) { console.log('[HATA] Updates:', e.message); return []; }
 }
 
 async function handleCommands() {
@@ -120,17 +131,19 @@ function calcRSI(closes, period = 14) {
 }
 
 async function getTopSymbols(limit = 50) {
-  const data = await fetch('https://api.binance.com/api/v3/ticker/24hr');
-  if (!Array.isArray(data)) return [];
-  return data
-    .filter(d => d.symbol.endsWith('USDT') && !d.symbol.match(/UP|DOWN|BULL|BEAR|4L|3L|2L|2S|3S|4S/))
-    .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
-    .slice(0, limit)
-    .map(d => d.symbol);
+  try {
+    const data = await fetchJSON('https://api.binance.com/api/v3/ticker/24hr');
+    if (!Array.isArray(data)) { console.log('[HATA] Binance response:', typeof data); return []; }
+    return data
+      .filter(d => d.symbol.endsWith('USDT') && !d.symbol.match(/UP|DOWN|BULL|BEAR|4L|3L|2L|2S|3S|4S/))
+      .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
+      .slice(0, limit)
+      .map(d => d.symbol);
+  } catch(e) { console.log('[HATA] getTopSymbols:', e.message); return []; }
 }
 
 async function getKlines(symbol, interval, limit = 100) {
-  return await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+  return await fetchJSON(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
 }
 
 async function scanAndNotify(label) {
