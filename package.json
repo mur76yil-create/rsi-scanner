@@ -1,0 +1,10 @@
+{
+  "name": "rsi-scanner",
+  "version": "1.0.0",
+  "description": "RSI Scanner - Telegram Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {}
+}
